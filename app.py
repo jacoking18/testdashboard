@@ -4,7 +4,7 @@ import plotly.express as px
 
 # ————— Page config —————
 st.set_page_config(
-    page_title="CSV Dashboard",
+    page_title="Lead Analytics Dashboard",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -17,10 +17,10 @@ st.sidebar.header("1. Upload CSV")
 uploaded_file = st.sidebar.file_uploader(
     "Choose a CSV file",
     type=["csv"],
-    help="Upload lead data with columns like ID, Provider, Cost"
+    help="Upload your lead data"
 )
 if not uploaded_file:
-    st.sidebar.info("Upload a CSV to begin analysis")
+    st.sidebar.info("Please upload a CSV to begin.")
     st.stop()
 
 # ————— Read data —————
@@ -29,96 +29,99 @@ try:
 except Exception as e:
     st.error(f"Error loading file: {e}")
     st.stop()
+
 # Work copy
 df = df_raw.copy()
 
-# ————— 2. Filters —————
-st.sidebar.header("2. Filters")
-# Convert object columns to datetime if possible
+# ————— 2. Field Mapping —————
+st.sidebar.header("2. Field Mapping")
+columns = df.columns.tolist()
+id_field = st.sidebar.selectbox("Unique ID field", options=[None] + columns)
+provider_field = st.sidebar.selectbox("Provider field", options=[None] + columns)
+cost_field = st.sidebar.selectbox("Cost field (numeric)", options=[None] + columns)
+date_field = st.sidebar.selectbox("Date field", options=[None] + columns)
+
+# Convert and filter by date if mapped
+if date_field:
+    df[date_field] = pd.to_datetime(df[date_field], errors='coerce')
+    start, end = st.sidebar.date_input(
+        "Filter by date range", [df[date_field].min(), df[date_field].max()]
+    )
+    df = df[(df[date_field] >= pd.to_datetime(start)) & (df[date_field] <= pd.to_datetime(end))]
+
+# ————— 3. Filters —————
+st.sidebar.header("3. Additional Filters")
 for col in df.columns:
-    if df[col].dtype == 'object':
-        try:
-            df[col] = pd.to_datetime(df[col])
-        except:
-            pass
-
-# Date range filter
-date_cols = df.select_dtypes(include='datetime').columns.tolist()
-if date_cols:
-    date_col = st.sidebar.selectbox("Date column", [None] + date_cols)
-    if date_col:
-        start, end = st.sidebar.date_input(
-            "Date range", [df[date_col].min(), df[date_col].max()]
-        )
-        df = df[(df[date_col] >= pd.to_datetime(start)) & (df[date_col] <= pd.to_datetime(end))]
-
-# Categorical filters
-for col in df.select_dtypes(include=['object', 'category']).columns:
-    vals = df[col].dropna().unique().tolist()
-    if len(vals) < 50:
-        sel = st.sidebar.multiselect(f"Filter {col}", options=vals, default=vals)
+    if col in [id_field, provider_field, cost_field, date_field]:
+        continue
+    vals = df[col].dropna().unique()
+    if len(vals) <= 50:
+        sel = st.sidebar.multiselect(f"Filter {col}", options=sorted(vals), default=list(vals))
         df = df[df[col].isin(sel)]
 
-# ————— 3. Data Overview —————
+# ————— 4. Data Overview —————
 st.subheader("📋 Data Overview")
 st.write(f"Total records: {len(df):,}")
 st.dataframe(df.head(10))
 
-# ————— 4. Duplicate Leads Analysis —————
+# ————— 5. Duplicate Detection —————
 st.subheader("🔎 Duplicate Leads")
-# Select ID column for duplicates
-dup_col = st.selectbox("Lead ID column for duplicate detection", options=[None] + list(df.columns))
-if dup_col:
-    dup_counts = df[dup_col].value_counts()
-    dup_values = dup_counts[dup_counts > 1]
-    st.write(f"Found {len(dup_values)} duplicated IDs (total duplicates: {dup_counts.sum() - len(dup_counts)})")
-    if not dup_values.empty:
-        st.dataframe(dup_values.rename('count').to_frame())
-        # Show detail of duplicated rows
-        if st.checkbox("Show duplicated row details"):
-            duplicated_rows = df[df[dup_col].isin(dup_values.index)]
-            st.dataframe(duplicated_rows)
+if id_field:
+    dup_counts = df[id_field].value_counts()
+    dup = dup_counts[dup_counts > 1]
+    st.write(f"Found {len(dup)} duplicate IDs")
+    if not dup.empty:
+        st.dataframe(dup.rename('count').to_frame())
+        if st.checkbox("Show duplicated rows details"):
+            st.dataframe(df[df[id_field].isin(dup.index)])
+else:
+    st.info("Select Unique ID field to detect duplicates.")
 
-# ————— 5. Cost by Provider —————
-st.subheader("💰 Cost and Spend Analysis")
-# Select provider and cost columns
-providers = df.columns.tolist()
-prov_col = st.selectbox("Lead Provider column", options=[None] + providers)
-cost_col = st.selectbox("Cost column", options=[None] + providers)
-if prov_col and cost_col:
-    df[cost_col] = pd.to_numeric(df[cost_col], errors='coerce')
-    summary = (
-        df.groupby(prov_col)[cost_col]
+# ————— 6. Spend Analysis —————
+st.subheader("💰 Spend Analysis")
+if provider_field and cost_field:
+    df[cost_field] = pd.to_numeric(df[cost_field], errors='coerce')
+    spend = (
+        df.groupby(provider_field)[cost_field]
         .agg(total_spend='sum', lead_count='count', avg_cost='mean')
         .sort_values('total_spend', ascending=False)
     )
-    st.write("Spend summary by provider:")
-    st.dataframe(summary)
-    # Plot spend
-    fig_spend = px.bar(
-        summary.reset_index(),
-        x=prov_col,
-        y='total_spend',
-        title='Total Spend by Provider',
-        labels={'total_spend':'Total Spend', prov_col:'Provider'}
+    st.write(spend)
+    fig = px.bar(
+        spend.reset_index(),
+        x=provider_field, y='total_spend',
+        title='Total Spend by Provider'
     )
-    st.plotly_chart(fig_spend, use_container_width=True)
-
-# ————— 6. Auto Charts —————
-st.subheader("📊 Quick Distribution Charts")
-num_cols = df.select_dtypes(include='number').columns.tolist()
-cat_cols = df.select_dtypes(include=['object','category']).columns.tolist()
-if num_cols:
-    col = st.selectbox("Numeric column for histogram", num_cols)
-    bins = st.slider("Bins", min_value=5, max_value=100, value=20)
-    fig = px.histogram(df, x=col, nbins=bins, title=f"Distribution of {col}")
     st.plotly_chart(fig, use_container_width=True)
-if cat_cols:
-    c = st.selectbox("Categorical column for bar chart", cat_cols)
-    counts = df[c].value_counts().reset_index()
-    counts.columns = [c, 'count']
-    fig2 = px.bar(counts, x=c, y='count', title=f"Counts of {c}")
-    st.plotly_chart(fig2, use_container_width=True)
+else:
+    st.info("Map Provider and Cost fields for spend analysis.")
+
+# ————— 7. Custom Chart Builder —————
+st.subheader("📊 Custom Chart Builder")
+st.write("Configure X, Y, and aggregation for tailored visualizations.")
+
+chart_cols = df.select_dtypes(include=['number', 'object', 'category', 'datetime']).columns.tolist()
+x = st.selectbox("X-axis", options=[None] + chart_cols)
+if x:
+    y_options = df.select_dtypes(include=['number']).columns.tolist()
+    y = st.selectbox("Y-axis (numeric)", options=[None] + y_options)
+    agg = st.selectbox("Aggregation", options=["None", "Count", "Sum", "Mean"])
+    chart_type = st.selectbox("Chart type", options=["Bar", "Line", "Scatter", "Pie"])
+    if st.button("Generate Chart"):
+        temp = df.copy()
+        if agg != "None" and y:
+            if agg == "Count":
+                data = temp.groupby(x).size().reset_index(name='value')
+            else:
+                data = temp.groupby(x)[y].agg('sum' if agg=='Sum' else 'mean').reset_index(name='value')
+            fig = getattr(px, chart_type.lower())(data, x=x, y='value', title=f"{agg} of {y} by {x}")
+        elif y and agg == "None":
+            fig = getattr(px, chart_type.lower())(temp, x=x, y=y, title=f"{y} vs {x}")
+        else:
+            fig = px.histogram(temp, x=x, title=f"Distribution of {x}")
+        st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Select an X-axis to start.")
 
 # ————— Footer —————
 st.markdown("---")
