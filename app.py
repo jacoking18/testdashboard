@@ -10,143 +10,116 @@ st.set_page_config(
 )
 
 # ————— Title —————
-st.title("🚀 CSV-to-Dashboard App")
+st.title("🚀 Lead Analytics Dashboard")
 
-# ————— Sidebar: File upload —————
+# ————— 1. Upload CSV —————
 st.sidebar.header("1. Upload CSV")
 uploaded_file = st.sidebar.file_uploader(
     "Choose a CSV file",
     type=["csv"],
-    help="Only .csv files supported"
+    help="Upload lead data with columns like ID, Provider, Cost"
 )
 if not uploaded_file:
-    st.sidebar.info("Please upload a CSV to begin.")
+    st.sidebar.info("Upload a CSV to begin analysis")
     st.stop()
 
-# ————— Read CSV —————
+# ————— Read data —————
 try:
     df_raw = pd.read_csv(uploaded_file)
 except Exception as e:
     st.error(f"Error loading file: {e}")
     st.stop()
-
-# Copy for filtering
+# Work copy
 df = df_raw.copy()
 
-# ————— Sidebar: Filters —————
+# ————— 2. Filters —————
 st.sidebar.header("2. Filters")
-# Date range filter for datetime columns
-datetime_cols = df.select_dtypes(include="datetime").columns.tolist()
-# Attempt parsing
+# Convert object columns to datetime if possible
 for col in df.columns:
     if df[col].dtype == 'object':
         try:
             df[col] = pd.to_datetime(df[col])
-            datetime_cols.append(col)
         except:
             pass
 
-if datetime_cols:
-    date_col = st.sidebar.selectbox("Date column for range filter", [None] + datetime_cols)
+# Date range filter
+date_cols = df.select_dtypes(include='datetime').columns.tolist()
+if date_cols:
+    date_col = st.sidebar.selectbox("Date column", [None] + date_cols)
     if date_col:
-        min_date, max_date = st.sidebar.date_input(
-            "Select date range",
-            value=[df[date_col].min(), df[date_col].max()]
+        start, end = st.sidebar.date_input(
+            "Date range", [df[date_col].min(), df[date_col].max()]
         )
-        df = df[(df[date_col] >= pd.to_datetime(min_date)) & (df[date_col] <= pd.to_datetime(max_date))]
+        df = df[(df[date_col] >= pd.to_datetime(start)) & (df[date_col] <= pd.to_datetime(end))]
 
-# Categorical and numeric filters
-disable = []
-for col in df.columns:
-    if col in datetime_cols:
-        continue
+# Categorical filters
+for col in df.select_dtypes(include=['object', 'category']).columns:
     vals = df[col].dropna().unique().tolist()
-    if len(vals) <= 50:
-        selected = st.sidebar.multiselect(f"Filter {col}", vals, default=vals)
-        df = df[df[col].isin(selected)]
-    else:
-        disable.append(col)
-if disable:
-    st.sidebar.caption(f"Skipped filters for high-cardinality columns: {', '.join(disable)}")
+    if len(vals) < 50:
+        sel = st.sidebar.multiselect(f"Filter {col}", options=vals, default=vals)
+        df = df[df[col].isin(sel)]
 
-# ————— Data preview —————
-st.subheader("📋 Filtered Data Preview")
-st.dataframe(df, height=300)
+# ————— 3. Data Overview —————
+st.subheader("📋 Data Overview")
+st.write(f"Total records: {len(df):,}")
+st.dataframe(df.head(10))
 
-# ————— Sidebar: Visualization options —————
-st.sidebar.header("3. Visualization")
-# Grid mode toggle
-grid_mode = st.sidebar.checkbox("Grid mode for auto charts", value=False)
-# Histogram bins
-bins = st.sidebar.slider("Histogram bins", min_value=5, max_value=100, value=20)
+# ————— 4. Duplicate Leads Analysis —————
+st.subheader("🔎 Duplicate Leads")
+# Select ID column for duplicates
+dup_col = st.selectbox("Lead ID column for duplicate detection", options=[None] + list(df.columns))
+if dup_col:
+    dup_counts = df[dup_col].value_counts()
+    dup_values = dup_counts[dup_counts > 1]
+    st.write(f"Found {len(dup_values)} duplicated IDs (total duplicates: {dup_counts.sum() - len(dup_counts)})")
+    if not dup_values.empty:
+        st.dataframe(dup_values.rename('count').to_frame())
+        # Show detail of duplicated rows
+        if st.checkbox("Show duplicated row details"):
+            duplicated_rows = df[df[dup_col].isin(dup_values.index)]
+            st.dataframe(duplicated_rows)
 
-numeric_cols = df.select_dtypes(include="number").columns.tolist()
-categorical_cols = df.select_dtypes(exclude=["number", "datetime"]).columns.tolist()
+# ————— 5. Cost by Provider —————
+st.subheader("💰 Cost and Spend Analysis")
+# Select provider and cost columns
+providers = df.columns.tolist()
+prov_col = st.selectbox("Lead Provider column", options=[None] + providers)
+cost_col = st.selectbox("Cost column", options=[None] + providers)
+if prov_col and cost_col:
+    df[cost_col] = pd.to_numeric(df[cost_col], errors='coerce')
+    summary = (
+        df.groupby(prov_col)[cost_col]
+        .agg(total_spend='sum', lead_count='count', avg_cost='mean')
+        .sort_values('total_spend', ascending=False)
+    )
+    st.write("Spend summary by provider:")
+    st.dataframe(summary)
+    # Plot spend
+    fig_spend = px.bar(
+        summary.reset_index(),
+        x=prov_col,
+        y='total_spend',
+        title='Total Spend by Provider',
+        labels={'total_spend':'Total Spend', prov_col:'Provider'}
+    )
+    st.plotly_chart(fig_spend, use_container_width=True)
 
-# ————— Auto-Generated Charts —————
-st.subheader("📊 Auto-Generated Charts")
-if grid_mode:
-    # Numeric in grid
-    if numeric_cols:
-        cols = st.columns(2)
-        for i, num in enumerate(numeric_cols):
-            fig = px.histogram(df, x=num, nbins=bins, title=f"Distribution of {num}")
-            cols[i % 2].plotly_chart(fig, use_container_width=True)
-    if categorical_cols:
-        cols2 = st.columns(2)
-        for i, cat in enumerate(categorical_cols):
-            counts = df[cat].value_counts().reset_index()
-            counts.columns = [cat, "count"]
-            fig = px.bar(counts, x=cat, y="count", title=f"Counts of {cat}")
-            cols2[i % 2].plotly_chart(fig, use_container_width=True)
-else:
-    col1, col2 = st.columns(2)
-    with col1:
-        if numeric_cols:
-            num = numeric_cols[0]
-            fig1 = px.histogram(df, x=num, nbins=bins, title=f"Distribution of {num}")
-            st.plotly_chart(fig1, use_container_width=True)
-    with col2:
-        if categorical_cols:
-            cat = categorical_cols[0]
-            counts = df[cat].value_counts().reset_index()
-            counts.columns = [cat, "count"]
-            fig2 = px.bar(counts, x=cat, y="count", title=f"Counts of {cat}")
-            st.plotly_chart(fig2, use_container_width=True)
-
-# ————— Custom Chart Builder —————
-st.sidebar.subheader("Custom Chart Builder")
-chart_type = st.sidebar.selectbox("Chart type", ["Line", "Bar", "Scatter", "Pie"])
-x_axis = st.sidebar.selectbox("X-axis", df.columns)
-agg = st.sidebar.selectbox("Aggregate", ["None", "Count"])
-if chart_type == "Pie":
-    y_axis = st.sidebar.selectbox("Values", numeric_cols)
-elif agg == "None":
-    y_axis = st.sidebar.selectbox("Y-axis", numeric_cols if numeric_cols else df.columns)
-else:
-    y_axis = None
-
-if st.sidebar.button("Generate Chart"):
-    if agg == "Count":
-        grouped = df.groupby(x_axis).size().reset_index(name='count')
-        if chart_type == "Bar":
-            fig = px.bar(grouped, x=x_axis, y='count', title=f"Count by {x_axis}")
-        else:
-            fig = px.scatter(grouped, x=x_axis, y='count', title=f"Count by {x_axis}")
-    else:
-        if chart_type == "Line":
-            fig = px.line(df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}")
-        elif chart_type == "Bar":
-            fig = px.bar(df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}")
-        elif chart_type == "Scatter":
-            fig = px.scatter(df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}")
-        else:
-            fig = px.pie(df, names=x_axis, values=y_axis, title=f"{y_axis} distribution")
+# ————— 6. Auto Charts —————
+st.subheader("📊 Quick Distribution Charts")
+num_cols = df.select_dtypes(include='number').columns.tolist()
+cat_cols = df.select_dtypes(include=['object','category']).columns.tolist()
+if num_cols:
+    col = st.selectbox("Numeric column for histogram", num_cols)
+    bins = st.slider("Bins", min_value=5, max_value=100, value=20)
+    fig = px.histogram(df, x=col, nbins=bins, title=f"Distribution of {col}")
     st.plotly_chart(fig, use_container_width=True)
+if cat_cols:
+    c = st.selectbox("Categorical column for bar chart", cat_cols)
+    counts = df[c].value_counts().reset_index()
+    counts.columns = [c, 'count']
+    fig2 = px.bar(counts, x=c, y='count', title=f"Counts of {c}")
+    st.plotly_chart(fig2, use_container_width=True)
 
 # ————— Footer —————
 st.markdown("---")
-st.markdown(
-    "<center>Made with ❤️ using Streamlit & Plotly | Upload a new file to refresh</center>",
-    unsafe_allow_html=True
-)
+st.caption("Made with ❤️ using Streamlit & Plotly")
